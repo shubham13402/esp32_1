@@ -31,8 +31,8 @@ unsigned long myChannelNumber  = 1386783;
 const char *  myWriteAPIKey    = "SL3IS82UAT15J05K";
 // https://thingspeak.com/channels/1386783
 String FirmwareVer = { "1.0" };
-#define URL_fw_Version "https://raw.githubusercontent.com/shubham13402/esp/master/bin_version.txt"
-#define FirmwareUrl "https://raw.githubusercontent.com/shubham13402/esp/master/fw.bin"
+#define URL_fw_Version "https://raw.githubusercontent.com/shubham13402/esp32_1/master/bin_version.txt"
+#define FirmwareUrl "https://raw.githubusercontent.com/shubham13402/esp32_1/master/fw.bin"
 
 // global variables
 RTC_DATA_ATTR float  Temp[MaxReadings], Humi[MaxReadings], Gas[MaxReadings], Batt[MaxReadings];
