@@ -30,7 +30,7 @@ const char*   timezone         = "UTC-05:30";
 unsigned long myChannelNumber  = 1386783;
 const char *  myWriteAPIKey    = "SL3IS82UAT15J05K";
 // https://thingspeak.com/channels/1386783
-String FirmwareVer = { "1.0" };
+String FirmwareVer = { "1.1" };
 #define URL_fw_Version "https://raw.githubusercontent.com/shubham13402/esp32_1/master/bin_version.txt"
 #define FirmwareUrl "https://raw.githubusercontent.com/shubham13402/esp32_1/master/fw.bin"
 
