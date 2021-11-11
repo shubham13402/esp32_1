@@ -1,8 +1,11 @@
-// Version 1.0 using RTC RAM
+// Version 2.0 using RTC RAM SLEEP and SD Card
 #include <WiFi.h>
 #include "HttpsOTAUpdate.h"
 #include <time.h>
 #include "RTClib.h"
+#include "FS.h"
+#include <SD.h>
+#include <SPI.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
@@ -12,7 +15,6 @@
 #include "SparkFunHTU21D.h"
 #include "ThingSpeak.h" // always include thingspeak header file after other header files and custom macros
 
-// Establishing Local server at port 80 or whatever port is required
 // Create instances of objects
 WiFiClient  client;
 RTC_DS3231  rtc;
@@ -21,23 +23,24 @@ HTU21D      mySensor;
 
 static        HttpsOTAStatus_t otastatus;
 
-int           UnixTime;
 int           TGSPin           = 34;
 int           BatteryPin       = 33;
+int           CS_pin           = 5;
 long          SleepDuration    = 1 * 60; // Every 1-minute
 const int     MaxReadings      = 100;
 const char*   timezone         = "UTC-05:30";
 unsigned long myChannelNumber  = 1386783;
 const char *  myWriteAPIKey    = "SL3IS82UAT15J05K";
 // https://thingspeak.com/channels/1386783
-String FirmwareVer = { "1.1" };
+String FirmwareVer = { "1.3" };
 #define URL_fw_Version "https://raw.githubusercontent.com/shubham13402/esp32_1/master/bin_version.txt"
-#define FirmwareUrl "https://raw.githubusercontent.com/shubham13402/esp32_1/master/fw.bin"
+#define URL_fw_Bin "https://raw.githubusercontent.com/shubham13402/esp32_1/master/fw.bin"
+
 
 // global variables
 RTC_DATA_ATTR float  Temp[MaxReadings], Humi[MaxReadings], Gas[MaxReadings], Batt[MaxReadings];
 RTC_DATA_ATTR int    Time[MaxReadings];
-RTC_DATA_ATTR int    ReadingIndex;
+RTC_DATA_ATTR int    ReadingIndex, UnixTime;
 RTC_DATA_ATTR String NTPtimenow, RTCtimenow;
 RTC_DATA_ATTR bool   TemporaryReadingsExist;
 RTC_DATA_ATTR float  Temp_reading, Humi_reading, Gas_reading, BattVolts;
@@ -50,24 +53,54 @@ const int   daylightOffset_sec = 0;
 int         awakeTimer         = 0;
 String      daysOfTheWeek[7]   = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
+void firmwareUpdate();
+int FirmwareVersionCheck();
+
+struct Button {
+               const uint8_t PIN; 
+               uint32_t numberKeyPresses; 
+               bool pressed;
+               };
+
+Button button_boot = {0,0,false};
+
+
+/*void IRAM_ATTR isr(void* arg) {
+    Button* s = static_cast<Button*>(arg);
+    s->numberKeyPresses += 1;
+    s->pressed = true;
+}*/
+
+void IRAM_ATTR isr() {
+  button_boot.numberKeyPresses += 1;
+  button_boot.pressed = true;
+}
+
+
 void setup() {
   awakeTimer = millis();
   SetupSerial(1);           // Setup Stage-1
   SetupGPIO(2);             // Setup Stage-2
-  ReportFirmwareVersion(3); // Setup Stage-3
-  SetupSensors(4);          // Setup Stage-4
-  StartRTCclock(5);         // Setup Stage-5
-  StartWiFiManager(6);      // Setup Stage-6
-  StartTimeServices(7);     // Setup Stage-7
-  CheckAdjustRTCclock(8);   // Setup Stage-8
-  StartThingSpeak(9);       // Setup Stage-9
-  FirmwareUpdateCheck(10);  // Setup Stage-10
+  SetupSensors(3);          // Setup Stage-3
+  StartRTCclock(4);         // Setup Stage-4
+  StartWiFiManager(5);      // Setup Stage-5
+  StartTimeServices(6);     // Setup Stage-6
+  CheckAdjustRTCclock(7);   // Setup Stage-7
+  StartThingSpeak(8);       // Setup Stage-8
+  StartSDcard(9);           // Setup Stage-9
+  if (FirmwareVersionCheck()) {
+      firmwareUpdate();}  // Setup Stage-10
   Serial.println("Started NTP clock = " + NTPtimenow);
   Serial.println("Started RTC clock = " + RTCtimenow);
   ReadSensors();
 }
 
 void loop() {
+    if (button_boot.pressed) { //to connect wifi via Android esp touch app 
+    Serial.println("Firmware update Starting..");
+    firmwareUpdate();
+    button_boot.pressed = false;
+  }
   GetRTCdatetime();
   ReadSensors(); // read and if WiFi not available, then save readings for next upload
   Serial.println(" Date-Time: " + NTPtimenow);
@@ -86,30 +119,79 @@ void loop() {
   esp_deep_sleep_start();   // Sleep for e.g. 10 minutes
 }
 
-//###########################################################################################################################
-void FirmwareUpdateCheck(int stage) {
-  Serial.print(String(stage) + ". Checking For Firmware Update...");
-  HttpsOTA.onHttpEvent(HttpEvent);
-  Serial.println("Starting OTA");
-  HttpsOTA.begin(FirmwareUrl, rootCACertificate);
-  Serial.println("Please Wait it takes some time...");
-  FirmwareUpdate();
-}
+// ############ Firmware Update ###########################################
+void firmwareUpdate(void) {
+  WiFiClientSecure client;
+  client.setCACert(rootCACertificate);
+  httpUpdate.setLedPin(LED_BUILTIN, LOW);
+  t_httpUpdate_return ret = httpUpdate.update(client, URL_fw_Bin);
 
-void FirmwareUpdate() {
-  Serial.println("Checking for new firmware...");
-  otastatus = HttpsOTA.status();
-  Serial.println("Checking complete...");
-  if (otastatus == HTTPS_OTA_SUCCESS) {
-    Serial.println(" Firmware written successfully...");
-    ESP.restart();
+  switch (ret) {
+  case HTTP_UPDATE_FAILED:
+    Serial.printf("HTTP_UPDATE_FAILD Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+    break;
+
+  case HTTP_UPDATE_NO_UPDATES:
+    Serial.println("HTTP_UPDATE_NO_UPDATES");
+    break;
+
+  case HTTP_UPDATE_OK:
+    Serial.println("HTTP_UPDATE_OK");
+    break;
   }
-  else if (otastatus == HTTPS_OTA_FAIL)
+}
+int FirmwareVersionCheck(void) {
+  String payload;
+  int httpCode;
+  String fwurl = "";
+  fwurl += URL_fw_Version;
+  fwurl += "?";
+  fwurl += String(rand());
+  Serial.println(fwurl);
+  WiFiClientSecure * client = new WiFiClientSecure;
+
+  if (client) 
   {
-    Serial.println(" No Firmware Upgrade Available...");
-  }
-}
+    client -> setCACert(rootCACertificate);
 
+    // Add a scoping block for HTTPClient https to make sure it is destroyed before WiFiClientSecure *client is 
+    HTTPClient https;
+
+    if (https.begin( * client, fwurl)) 
+    { // HTTPS      
+      Serial.print("[HTTPS] GET...\n");
+      // start connection and send HTTP header
+      delay(100);
+      httpCode = https.GET();
+      delay(100);
+      if (httpCode == HTTP_CODE_OK) // if version received
+      {
+        payload = https.getString(); // save received version
+      } else {
+        Serial.print("error in downloading version file:");
+        Serial.println(httpCode);
+      }
+      https.end();
+    }
+    delete client;
+  }
+      
+  if (httpCode == HTTP_CODE_OK) // if version received
+  {
+    payload.trim();
+    if (payload.equals(FirmwareVer)) {
+      Serial.printf("\nDevice already on latest firmware version:%s\n", FirmwareVer);
+      return 0;
+    } 
+    else 
+    {
+      Serial.println(payload);
+      Serial.println("New firmware detected");
+      return 1;
+    }
+  } 
+  return 0;  
+}
 // ############ SYSTEM Services ##########################################
 void SetupSerial(int stage) {
   Serial.begin(115200);
@@ -121,12 +203,9 @@ void SetupGPIO(int stage) {
   Serial.println(String(stage)  + ". Setting up GPIO ports...");
   pinMode(TGSPin, INPUT);
   pinMode(BatteryPin, INPUT);
-}
-
-void ReportFirmwareVersion(int stage) {
-  Serial.print(String(stage)  + ". Reporting Firmware Version...");
-  Serial.print("Active firmware version:");
-  Serial.println(FirmwareVer);
+  pinMode(CS_pin, OUTPUT);
+  pinMode(button_boot.PIN, INPUT);
+  attachInterrupt(button_boot.PIN, isr, RISING);
 }
 
 // ############ Thingspeak Services ##########################################
@@ -176,6 +255,7 @@ void ReadSensors() {
   Humi_reading = mySensor.readHumidity();               //random(450, 550)   / 10.0;
   Gas_reading  = analogRead(TGSPin);                    //random(2500, 3500) / 10.0;
   BattVolts    = analogRead(BatteryPin) / 2048.0 * 3.3; //random(38, 42)     / 10.0;
+  LogData(UnixTime, Temp_reading, Humi_reading, Gas_reading, BattVolts);
   if (WiFi.status() != WL_CONNECTED) {  // Now save readings if WiFi is not connected/available
     Time[ReadingIndex] = UnixTime;
     Temp[ReadingIndex] = Temp_reading;
@@ -198,11 +278,39 @@ void ClearSensorReadings() {
   ReadingIndex = 0;
 }
 
+// ############ SD CARD logging #########################################
+void StartSDcard(int stage) {
+  Serial.print(String(stage) + ". Starting SD Card services...");
+  if (SD.begin()) Serial.println(" SD card is ready to use...");
+  else            Serial.println(" SD card initialisation failed");
+  uint8_t cardType = SD.cardType();
+  if(cardType == CARD_NONE) {
+    Serial.println("*** No SD card inserted ***");
+  }
+  File file = SD.open("/data.txt", FILE_WRITE);
+  if(!file) {
+    Serial.println("Failed to open file for writing...");
+  }
+  file.close();
+}
+
+void LogData(int datetime, float temp, float humi, float gas, float battvolts) {
+  File file = SD.open("/data.txt", FILE_APPEND);
+  if(!file) {
+    Serial.println("Failed to open file for appending...");
+  }
+  else
+  {
+    file.println(String(datetime) + "," + String(temp, 1) + "," + String(humi, 1) + "," + String(gas, 1)  + "," + String(battvolts, 1) + "\r\n");
+  }
+  file.close();
+}
+
 // ############ WiFi Services ##########################################
 void StartWiFiManager(int stage) {
   Serial.println(String(stage) + ". Starting WiFi Connection...");
   WiFiManager manager;
-  bool success = manager.autoConnect("ESP32_AP", "");   //Soft AP Credentials 
+  bool success = manager.autoConnect("esp32_AP", "");   //soft ap credentials
   if (!success) {
     Serial.println("Failed to connect...");
     Serial.println("Please enter http://192.168.4.1/ in your browser address bar");
@@ -320,32 +428,8 @@ String get_RTC_time() {
   return Datetime;
 }
 
-void HttpEvent(HttpEvent_t *event) {
-  switch (event->event_id) {
-    case HTTP_EVENT_ERROR:
-      Serial.println("Http Event Error");
-      break;
-    case HTTP_EVENT_ON_CONNECTED:
-      Serial.println("Http Event On Connected");
-      break;
-    case HTTP_EVENT_HEADER_SENT:
-      Serial.println("Http Event Header Sent");
-      break;
-    case HTTP_EVENT_ON_HEADER:
-      Serial.printf("Http Event On Header, key=%s, value=%s\n", event->header_key, event->header_value);
-      break;
-    case HTTP_EVENT_ON_DATA:
-      break;
-    case HTTP_EVENT_ON_FINISH:
-      Serial.println("Http Event On Finish");
-      break;
-    case HTTP_EVENT_DISCONNECTED:
-      Serial.println("Http Event Disconnected");
-      break;
-  }
-}
 
-// 343 of lines of code on 09/11/21
+// 429 of lines of code on 11/11/21
 
 /*
   So my overall summary of the project is  to make a esp32 (esp wroom 32) driven project,
